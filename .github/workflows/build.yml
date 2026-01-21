@@ -24,6 +24,11 @@ jobs:
             cross: aarch64-linux-gnu-
             compiler: aarch64-linux-gnu-gcc
 
+    # expose matrix values as environment variables so every step can use them
+    env:
+      ARCH: ${{ matrix.arch }}
+      CROSS_COMPILE: ${{ matrix.cross }}
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -37,25 +42,33 @@ jobs:
             bison \
             flex \
             libssl-dev \
-            gcc-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            qemu-user-static || true
+
+      - name: Show compiler (diagnostic)
+        run: |
+          echo "ARCH=${ARCH}"
+          echo "CROSS_COMPILE=${CROSS_COMPILE}"
+          ${CROSS_COMPILE}gcc --version || true
 
       - name: BusyBox defconfig
         run: |
           make distclean
-          make defconfig
+          make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} defconfig
 
       - name: Build BusyBox (${{ matrix.name }})
         run: |
-          make \
-            ARCH=${{ matrix.arch }} \
-            CROSS_COMPILE=${{ matrix.cross }} \
-            -j$(nproc)
+          # build the busybox binary (use explicit target)
+          make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} busybox -j$(nproc)
 
       - name: Prepare output
         run: |
           mkdir -p out/${{ matrix.name }}
+          # busybox binary is created at top-level as 'busybox'
           cp busybox out/${{ matrix.name }}/busybox
           file out/${{ matrix.name }}/busybox
+          ls -lh out/${{ matrix.name }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
