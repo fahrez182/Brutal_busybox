@@ -1,0 +1,49 @@
+name: Build BusyBox
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-multiabi:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: x86_64
+            arch: x86_64
+            cross: ""
+            cc: gcc
+          - name: aarch64
+            arch: aarch64
+            cross: aarch64-linux-gnu-
+            cc: aarch64-linux-gnu-gcc
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install cross-compiler for ARM
+        if: matrix.cross != ''
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure BusyBox
+        run: |
+          make defconfig
+          # opsional: modifikasi .config secara otomatis
+          sed -i "s/CONFIG_CROSS_COMPILER_PREFIX=\"\"/CONFIG_CROSS_COMPILER_PREFIX=\"${{ matrix.cross }}\"/" .config
+
+      - name: Build BusyBox for ${{ matrix.name }}
+        run: |
+          make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross }} -j$(nproc)
+          mkdir -p out/${{ matrix.name }}
+          cp busybox out/${{ matrix.name }}/busybox
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: busybox-${{ matrix.name }}
+          path: out/${{ matrix.name }}/busybox
