@@ -1,148 +1,119 @@
-name: Build BusyBox (multi-ABI including Android NDK)
+name: Build BusyBox for Android ABIs
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-  workflow_dispatch:
+
+env:
+  # Ubah versi NDK jika perlu (contoh: r25b, r24b, dll.)
+  NDK_VERSION: r25b
 
 jobs:
-  build-multiabi:
+  build:
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: x86_64
-            arch: x86_64
-            target: linux
-            cross: ""
-            compiler: gcc
-
-          - name: aarch64-android
-            arch: arm64
-            target: android
-            cross: aarch64-linux-android-
-            compiler: clang
-
-    env:
-      # defaults — overridden for android steps when needed
-      ARCH: ${{ matrix.arch }}
-      CROSS_COMPILE: ${{ matrix.cross }}
+          - abi: armeabi-v7a
+            make_arch: arm
+            cc_triple: armv7a-linux-androideabi
+            api: 16
+          - abi: arm64-v8a
+            make_arch: arm64
+            cc_triple: aarch64-linux-android
+            api: 21
+          - abi: x86
+            make_arch: x86
+            cc_triple: i686-linux-android
+            api: 16
+          - abi: x86_64
+            make_arch: x86_64
+            cc_triple: x86_64-linux-android
+            api: 21
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies (apt)
+      - name: Prepare NDK zip name
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            ca-certificates \
-            unzip \
-            wget \
-            qemu-user-static || true
+          echo "NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip" >> $GITHUB_ENV
 
-      - name: Show environment (diagnostic)
+      - name: Download and extract Android NDK
         run: |
-          echo "matrix.name=${{ matrix.name }}"
-          echo "ARCH=${ARCH}"
-          echo "CROSS_COMPILE=${CROSS_COMPILE}"
-
-      # === Android NDK setup (only for android target) ===
-      - name: Download & extract Android NDK (r25b) (only android)
-        if: ${{ matrix.target == 'android' }}
-        run: |
-          NDK_VERSION=r25b
-          NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip
-          wget -q https://dl.google.com/android/repository/${NDK_ZIP}
-          unzip -q ${NDK_ZIP}
+          set -e
+          echo "Downloading NDK ${NDK_VERSION}..."
+          curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o android-ndk.zip
+          unzip -q android-ndk.zip
           mv android-ndk-${NDK_VERSION} ndk
-          ls -ld ndk
+          echo "NDK=$PWD/ndk" >> $GITHUB_ENV
+          echo "$PWD/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      - name: Setup Android toolchain env (only android)
-        if: ${{ matrix.target == 'android' }}
+      - name: Show NDK info
         run: |
-          # adjust API level if you want; arm64 generally needs API >=21
-          API=21
-          export NDK_ROOT=$GITHUB_WORKSPACE/ndk
-          export TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
-          export CC=${TOOLCHAIN}/aarch64-linux-android${API}-clang
-          export CXX=${TOOLCHAIN}/aarch64-linux-android${API}-clang++
-          export AR=${TOOLCHAIN}/llvm-ar
-          export RANLIB=${TOOLCHAIN}/llvm-ranlib
-          export STRIP=${TOOLCHAIN}/aarch64-linux-android-strip
-          export SYSROOT=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot
-          echo "CC=$CC"
-          $CC --version || true
-          # export these to be visible in later steps via $GITHUB_ENV
-          echo "CC=$CC" >> $GITHUB_ENV
-          echo "CXX=$CXX" >> $GITHUB_ENV
-          echo "AR=$AR" >> $GITHUB_ENV
-          echo "RANLIB=$RANLIB" >> $GITHUB_ENV
-          echo "STRIP=$STRIP" >> $GITHUB_ENV
-          echo "SYSROOT=$SYSROOT" >> $GITHUB_ENV
-          echo "API=$API" >> $GITHUB_ENV
-          # keep CROSS_COMPILE name consistent for BusyBox make
-          echo "CROSS_COMPILE=${{ matrix.cross }}" >> $GITHUB_ENV
+          echo "NDK: $NDK"
+          ls -1 $NDK || true
+          echo "Toolchain dir:"
+          ls -1 $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin | head -n 40 || true
 
-      # Ensure a clean config before building
-      - name: BusyBox defconfig
+      - name: Build BusyBox for ${{ matrix.abi }}
+        env:
+          NDK: ${{ env.NDK }}
+          TRIPLE: ${{ matrix.cc_triple }}
+          API: ${{ matrix.api }}
+          ABI: ${{ matrix.abi }}
+          MAKE_ARCH: ${{ matrix.make_arch }}
         run: |
+          set -xe
+          # Ensure toolchain bins in PATH
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+          BUILD_DIR=build-${ABI}
+          OUT_DIR=out/${ABI}
+          mkdir -p "${BUILD_DIR}" "${OUT_DIR}"
+
+          # Use clang wrapper from NDK (triple+api)
+          export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang"
+          export AR="${TRIPLE}-ar"
+          export RANLIB="${TRIPLE}-ranlib"
+          export STRIP="${TRIPLE}-strip"
+          echo "Using CC=$CC"
+          echo "Using AR=$AR"
+
+          # Clean up any previous build artifacts (ignore errors)
           make distclean || true
-          if [ "${{ matrix.target }}" = "android" ]; then
-            # create default config for aarch64 and enable static
-            make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} defconfig
-            # enable static build to produce a portable binary for Android
-            # BusyBox provides scripts/config to manipulate .config
-            if [ -x scripts/config ]; then
-              scripts/config --set-val CONFIG_STATIC y
-              scripts/config --set-val CONFIG_PREFIX ""
-              make oldconfig
-            else
-              # fallback: sed enabling CONFIG_STATIC if present
-              sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config || true
-            fi
+
+          # Generate default config then force static build in .config if possible
+          make defconfig
+
+          # Ensure CONFIG_STATIC=y in .config (append or replace)
+          if grep -q '^CONFIG_STATIC=' .config 2>/dev/null; then
+            sed -i 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' .config || true
           else
-            make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} defconfig
+            echo 'CONFIG_STATIC=y' >> .config || true
           fi
 
-      - name: Build BusyBox (${{ matrix.name }})
-        run: |
-          # Use NDK clang + sysroot for android target (CC, AR etc. injected via GITHUB_ENV)
-          if [ "${{ matrix.target }}" = "android" ]; then
-            echo "Building for Android (aarch64) using NDK clang"
-            make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} \
-              CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" STRIP="${STRIP}" \
-              CFLAGS="--sysroot=${SYSROOT} -O2" LDFLAGS="--sysroot=${SYSROOT}" \
-              busybox -j$(nproc)
+          # Build using an out-of-tree build directory to keep repo clean
+          make -j$(nproc) O="${BUILD_DIR}" ARCH="${MAKE_ARCH}" CROSS_COMPILE="${TRIPLE}-" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
+
+          # BusyBox binary location depends on BusyBox version; typical location:
+          if [ -f "${BUILD_DIR}/busybox" ]; then
+            cp "${BUILD_DIR}/busybox" "${OUT_DIR}/busybox"
+          elif [ -f "busybox" ]; then
+            # fallback when O= isn't honored
+            cp busybox "${OUT_DIR}/busybox"
           else
-            echo "Building for native linux ${ARCH}"
-            make ARCH=${ARCH} CROSS_COMPILE=${CROSS_COMPILE} busybox -j$(nproc)
+            # find binary
+            find "${BUILD_DIR}" -maxdepth 2 -type f -name 'busybox' -exec cp {} "${OUT_DIR}/busybox" \; || true
           fi
 
-      - name: Prepare output
-        run: |
-          outdir=out/${{ matrix.name }}
-          mkdir -p "$outdir"
-          if [ -f busybox ]; then
-            cp busybox "$outdir"/busybox
-            file "$outdir"/busybox || true
-            ls -lh "$outdir"
-          else
-            echo "busybox binary not found; listing workspace for debug"
-            ls -la
-            false
-          fi
+          file "${OUT_DIR}/busybox" || true
+          ls -l "${OUT_DIR}" || true
 
-      - name: Upload artifact
+      - name: Upload busybox artifact
         uses: actions/upload-artifact@v4
         with:
-          name: busybox-${{ matrix.name }}
-          path: out/${{ matrix.name }}/busybox
+          name: busybox-${{ matrix.abi }}
+          path: out/${{ matrix.abi }}/busybox
