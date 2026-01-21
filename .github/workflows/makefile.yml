@@ -1,9 +1,9 @@
 name: Build BusyBox for Android ABIs
 
 on:
-  push:
-    branches: [ main ]
+  workflow_dispatch:
   pull_request:
+    branches: [ main ]
 
 env:
   # Ubah versi NDK jika perlu (contoh: r25b, r24b, dll.)
