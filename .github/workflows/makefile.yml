@@ -1,0 +1,119 @@
+name: Build BusyBox for Android ABIs
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  # Ubah versi NDK jika perlu (contoh: r25b, r24b, dll.)
+  NDK_VERSION: r25b
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: armeabi-v7a
+            make_arch: arm
+            cc_triple: armv7a-linux-androideabi
+            api: 16
+          - abi: arm64-v8a
+            make_arch: arm64
+            cc_triple: aarch64-linux-android
+            api: 21
+          - abi: x86
+            make_arch: x86
+            cc_triple: i686-linux-android
+            api: 16
+          - abi: x86_64
+            make_arch: x86_64
+            cc_triple: x86_64-linux-android
+            api: 21
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare NDK zip name
+        run: |
+          echo "NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip" >> $GITHUB_ENV
+
+      - name: Download and extract Android NDK
+        run: |
+          set -e
+          echo "Downloading NDK ${NDK_VERSION}..."
+          curl -sSfL "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o android-ndk.zip
+          unzip -q android-ndk.zip
+          mv android-ndk-${NDK_VERSION} ndk
+          echo "NDK=$PWD/ndk" >> $GITHUB_ENV
+          echo "$PWD/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Show NDK info
+        run: |
+          echo "NDK: $NDK"
+          ls -1 $NDK || true
+          echo "Toolchain dir:"
+          ls -1 $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin | head -n 40 || true
+
+      - name: Build BusyBox for ${{ matrix.abi }}
+        env:
+          NDK: ${{ env.NDK }}
+          TRIPLE: ${{ matrix.cc_triple }}
+          API: ${{ matrix.api }}
+          ABI: ${{ matrix.abi }}
+          MAKE_ARCH: ${{ matrix.make_arch }}
+        run: |
+          set -xe
+          # Ensure toolchain bins in PATH
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+
+          BUILD_DIR=build-${ABI}
+          OUT_DIR=out/${ABI}
+          mkdir -p "${BUILD_DIR}" "${OUT_DIR}"
+
+          # Use clang wrapper from NDK (triple+api)
+          export CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TRIPLE}${API}-clang"
+          export AR="${TRIPLE}-ar"
+          export RANLIB="${TRIPLE}-ranlib"
+          export STRIP="${TRIPLE}-strip"
+          echo "Using CC=$CC"
+          echo "Using AR=$AR"
+
+          # Clean up any previous build artifacts (ignore errors)
+          make distclean || true
+
+          # Generate default config then force static build in .config if possible
+          make defconfig
+
+          # Ensure CONFIG_STATIC=y in .config (append or replace)
+          if grep -q '^CONFIG_STATIC=' .config 2>/dev/null; then
+            sed -i 's/^CONFIG_STATIC=.*/CONFIG_STATIC=y/' .config || true
+          else
+            echo 'CONFIG_STATIC=y' >> .config || true
+          fi
+
+          # Build using an out-of-tree build directory to keep repo clean
+          make -j$(nproc) O="${BUILD_DIR}" ARCH="${MAKE_ARCH}" CROSS_COMPILE="${TRIPLE}-" CC="${CC}" AR="${AR}" RANLIB="${RANLIB}" STRIP="${STRIP}"
+
+          # BusyBox binary location depends on BusyBox version; typical location:
+          if [ -f "${BUILD_DIR}/busybox" ]; then
+            cp "${BUILD_DIR}/busybox" "${OUT_DIR}/busybox"
+          elif [ -f "busybox" ]; then
+            # fallback when O= isn't honored
+            cp busybox "${OUT_DIR}/busybox"
+          else
+            # find binary
+            find "${BUILD_DIR}" -maxdepth 2 -type f -name 'busybox' -exec cp {} "${OUT_DIR}/busybox" \; || true
+          fi
+
+          file "${OUT_DIR}/busybox" || true
+          ls -l "${OUT_DIR}" || true
+
+      - name: Upload busybox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: busybox-${{ matrix.abi }}
+          path: out/${{ matrix.abi }}/busybox
