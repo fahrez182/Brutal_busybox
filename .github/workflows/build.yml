@@ -1,49 +1,64 @@
-name: Build BusyBox
+name: Build BusyBox (multi-ABI)
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   build-multiabi:
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: x86_64
             arch: x86_64
             cross: ""
-            cc: gcc
+            compiler: gcc
+
           - name: aarch64
-            arch: aarch64
+            arch: arm64
             cross: aarch64-linux-gnu-
-            cc: aarch64-linux-gnu-gcc
+            compiler: aarch64-linux-gnu-gcc
 
     steps:
-      - name: Checkout repo
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install cross-compiler for ARM
-        if: matrix.cross != ''
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Configure BusyBox
+      - name: Install build dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            gcc-aarch64-linux-gnu
+
+      - name: BusyBox defconfig
+        run: |
+          make distclean
           make defconfig
-          # opsional: modifikasi .config secara otomatis
-          sed -i "s/CONFIG_CROSS_COMPILER_PREFIX=\"\"/CONFIG_CROSS_COMPILER_PREFIX=\"${{ matrix.cross }}\"/" .config
 
-      - name: Build BusyBox for ${{ matrix.name }}
+      - name: Build BusyBox (${{ matrix.name }})
         run: |
-          make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross }} -j$(nproc)
+          make \
+            ARCH=${{ matrix.arch }} \
+            CROSS_COMPILE=${{ matrix.cross }} \
+            -j$(nproc)
+
+      - name: Prepare output
+        run: |
           mkdir -p out/${{ matrix.name }}
           cp busybox out/${{ matrix.name }}/busybox
+          file out/${{ matrix.name }}/busybox
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: busybox-${{ matrix.name }}
           path: out/${{ matrix.name }}/busybox
